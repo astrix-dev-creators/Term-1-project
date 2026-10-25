@@ -1,134 +1,229 @@
 /**
- * Smart Umbrella System - Mock ESP32 Hardware Simulator
- * Allows full end-to-end testing of HiveMQ MQTT, NFC Scanning, and Lock Releasing.
+ * Project ASTRIX — Hardware ESP32 Cabinet Simulator
+ * Matches the official Hardware Team API Integration Contract:
+ * 
+ * Topics:
+ *   - Subscribes to: astrix-umbrella/cabinet/command
+ *   - Publishes to:   astrix-umbrella/cabinet/response
+ * 
+ * Simulated Outcomes:
+ *   Case 1: BORROW SUCCESS
+ *   Case 2: BORROW FAIL (NOT_TAKEN)
+ *   Case 3: RETURN SUCCESS
+ *   Case 4: RETURN FAIL (NO_UMBRELLA)
+ *   Case 5: RETURN FAIL (WRONG_UMBRELLA)
  * 
  * Usage:
  *   node firmware/mock_esp32.js
  */
 
+const readline = require('readline');
 let mqtt;
 try {
   mqtt = require('mqtt');
 } catch (e) {
   try {
-    mqtt = require('../backend/node_modules/mqtt');
+    mqtt = require('../node_modules/mqtt');
   } catch (e2) {
-    console.error('❌ MQTT package not found. Run "npm install" in backend/ first.');
+    console.error('❌ MQTT package not found. Run "npm install" in the project root.');
     process.exit(1);
   }
 }
-const readline = require('readline');
 
-const BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://broker.hivemq.com:1883';
-const CLIENT_ID = `mock-esp32-${Math.random().toString(16).substring(2, 8)}`;
+const BROKER_URL = process.env.HIVEMQ_BROKER_URL || 'mqtt://broker.hivemq.com:1883';
+const CLIENT_ID = `astrix-mock-cabinet-${Math.random().toString(16).substring(2, 8)}`;
 
-const TOPIC_SCAN = 'smart-umbrella/esp32/scan';
-const TOPIC_UNLOCK = 'smart-umbrella/esp32/unlock';
-const TOPIC_STATUS = 'smart-umbrella/esp32/status';
-const TOPIC_FEEDBACK = 'smart-umbrella/esp32/feedback';
+const TOPIC_COMMAND = 'astrix-umbrella/cabinet/command';
+const TOPIC_RESPONSE = 'astrix-umbrella/cabinet/response';
 
-console.log(`🔌 [Mock ESP32] Connecting to HiveMQ at: ${BROKER_URL}...`);
-const client = mqtt.connect(BROKER_URL, { clientId: CLIENT_ID });
+let currentSlot = 1;
 
-const SLOTS = [
-  { slotNumber: 1, tagUid: '04A1B2C3D4', code: 'UMB-01', locked: true },
-  { slotNumber: 2, tagUid: '04B2C3D4E5', code: 'UMB-02', locked: true },
-  { slotNumber: 3, tagUid: '04C3D4E5F6', code: 'UMB-03', locked: true },
-  { slotNumber: 4, tagUid: '04D4E5F6A7', code: 'UMB-04', locked: true },
-];
+console.log('☂️ ======================================================');
+console.log('☂️   PROJECT ASTRIX — ESP32 CABINET HARDWARE SIMULATOR   ');
+console.log('☂️ ======================================================');
+console.log(`🔌 Connecting to HiveMQ Broker: ${BROKER_URL}...`);
+
+const client = mqtt.connect(BROKER_URL, {
+  clientId: CLIENT_ID,
+  clean: true,
+  connectTimeout: 5000,
+  username: process.env.HIVEMQ_USERNAME || undefined,
+  password: process.env.HIVEMQ_PASSWORD || undefined,
+});
 
 client.on('connect', () => {
-  console.log(`✅ [Mock ESP32] Connected to HiveMQ! Client ID: ${CLIENT_ID}`);
+  console.log(`✅ [ESP32 Cabinet] Connected to HiveMQ Broker! (Client ID: ${CLIENT_ID})`);
 
-  client.subscribe(TOPIC_UNLOCK, (err) => {
-    if (err) console.error('Subscription error:', err);
-    else console.log(`📡 [Mock ESP32] Listening for unlock commands on "${TOPIC_UNLOCK}"\n`);
+  const commandTopics = [TOPIC_COMMAND];
+
+  client.subscribe(commandTopics, (err) => {
+    if (err) {
+      console.error('❌ [ESP32 Cabinet] Subscription error:', err);
+    } else {
+      console.log(`📡 [ESP32 Cabinet] Listening for Commands on:`);
+      commandTopics.forEach((t) => console.log(`   👉 ${t}`));
+      console.log('');
+    }
   });
-
-  // Heartbeat every 15s
-  setInterval(() => {
-    client.publish(TOPIC_STATUS, JSON.stringify({
-      stationId: 'esp32-station-01',
-      status: 'ONLINE',
-      timestamp: Date.now(),
-    }));
-  }, 15000);
 
   printMenu();
 });
 
 client.on('message', (topic, message) => {
-  if (topic === TOPIC_UNLOCK) {
-    try {
-      const data = JSON.parse(message.toString());
-      console.log(`\n======================================================`);
-      console.log(`🔓 [HARDWARE SIGNAL] UNLOCK COMMAND RECEIVED!`);
-      console.log(`⚡ Solenoid Lock on Slot #${data.slotNumber} ENERGIZED (OPENED) for ${data.durationMs || 5000}ms!`);
-      console.log(`======================================================`);
+  try {
+    const data = JSON.parse(message.toString());
+    const action = data.action || (topic.includes('return') ? 'RETURN' : 'BORROW');
+    const slot = data.slot || 1;
+    currentSlot = slot;
 
-      const target = SLOTS.find((s) => s.slotNumber === data.slotNumber);
-      if (target) target.locked = false;
+    console.log('\n⚡ ======================================================');
+    console.log(`⚡ [CABINET COMMAND RECEIVED] Action: ${action} | Slot: #${slot}`);
+    console.log(`⚡ Servo/Solenoid lock releasing on Slot #${slot}...`);
+    console.log('⚡ ======================================================\n');
 
-      // Send feedback
-      client.publish(TOPIC_FEEDBACK, JSON.stringify({
-        slotNumber: data.slotNumber,
-        event: 'LOCK_RELEASED',
-        stationId: 'esp32-station-01',
-      }));
-
-      // Simulate re-locking after duration
-      setTimeout(() => {
-        if (target) target.locked = true;
-        console.log(`\n🔒 [HARDWARE SIGNAL] Slot #${data.slotNumber} lock RE-ENGAGED.`);
-        printMenu();
-      }, data.durationMs || 5000);
-    } catch (e) {
-      console.error('Error handling unlock:', e);
+    if (action === 'OPEN' || action === 'CLOSE') {
+      const isOpening = action === 'OPEN';
+      console.log(`⚡ [DIRECT LOCK] Slot #${slot} servo set to ${isOpening ? 'OPEN (0°)' : 'CLOSED (180°)'}`);
+      const payload = {
+        action: action,
+        slot: slot,
+        status: 'SUCCESS',
+        message: `Slot #${slot} lock ${isOpening ? 'opened' : 'closed'}.`,
+      };
+      client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+      console.log(`✅ [SENT DIRECT LOCK RESPONSE] on ${TOPIC_RESPONSE}:`, payload);
+      printMenu();
+      return;
     }
+
+    printMenu();
+  } catch (e) {
+    console.error('❌ Error parsing command:', e.message);
   }
 });
 
-function simulateScan(slotIndex) {
-  const slot = SLOTS[slotIndex];
-  if (!slot) {
-    console.log('Invalid slot index');
-    return;
-  }
-
+// Case 1: Borrow Success
+function simulateBorrowSuccess(slot = currentSlot) {
   const payload = {
-    tagUid: slot.tagUid,
-    slotNumber: slot.slotNumber,
-    stationId: 'esp32-station-01',
-    timestamp: Date.now(),
+    action: 'BORROW',
+    slot: slot,
+    status: 'SUCCESS',
+    message: `Umbrella taken from Slot ${slot}. Closing the lock.`,
   };
 
-  console.log(`\n🏷️ [Simulating NFC Scan]`);
-  console.log(`Tag UID: ${slot.tagUid} (Slot #${slot.slotNumber} - ${slot.code})`);
-  client.publish(TOPIC_SCAN, JSON.stringify(payload));
-  console.log(`📤 Published scan event to HiveMQ topic "${TOPIC_SCAN}"`);
+  client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+  console.log(`\n🟢 [SENT CASE 1: BORROW SUCCESS] on ${TOPIC_RESPONSE}`);
+  console.log(payload);
+  console.log('');
+  printMenu();
+}
+
+// Case 2: Borrow Fail (NOT_TAKEN)
+function simulateBorrowFail(slot = currentSlot) {
+  const payload = {
+    action: 'BORROW',
+    slot: slot,
+    status: 'FAIL',
+    reason: 'NOT_TAKEN',
+    message: `Umbrella was NOT taken from Slot ${slot} after 5 checks. Closing the lock.`,
+  };
+
+  client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+  console.log(`\n🔴 [SENT CASE 2: BORROW FAIL - NOT_TAKEN] on ${TOPIC_RESPONSE}`);
+  console.log(payload);
+  console.log('');
+  printMenu();
+}
+
+// Case 3: Return Success
+function simulateReturnSuccess(slot = currentSlot) {
+  const payload = {
+    action: 'RETURN',
+    slot: slot,
+    status: 'SUCCESS',
+    message: `Umbrella ${slot} returned to Slot ${slot}. Closing the lock.`,
+  };
+
+  client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+  console.log(`\n🟢 [SENT CASE 3: RETURN SUCCESS] on ${TOPIC_RESPONSE}`);
+  console.log(payload);
+  console.log('');
+  printMenu();
+}
+
+// Case 4: Return Fail (NO_UMBRELLA)
+function simulateReturnFailNoUmbrella(slot = currentSlot) {
+  const payload = {
+    action: 'RETURN',
+    slot: slot,
+    status: 'FAIL',
+    reason: 'NO_UMBRELLA',
+    message: `No umbrella returned to Slot ${slot} after 5 checks. Closing the lock.`,
+  };
+
+  client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+  console.log(`\n🔴 [SENT CASE 4: RETURN FAIL - NO_UMBRELLA] on ${TOPIC_RESPONSE}`);
+  console.log(payload);
+  console.log('');
+  printMenu();
+}
+
+// Case 5: Return Fail (WRONG_UMBRELLA)
+function simulateReturnFailWrongUmbrella(slot = currentSlot) {
+  const payload = {
+    action: 'RETURN',
+    slot: slot,
+    status: 'FAIL',
+    reason: 'WRONG_UMBRELLA',
+    message: `Wrong umbrella in Slot ${slot}. Leaving the slot UNLOCKED - take it out and return Umbrella ${slot}.`,
+  };
+
+  client.publish(TOPIC_RESPONSE, JSON.stringify(payload), { qos: 0 });
+  console.log(`\n🔴 [SENT CASE 5: RETURN FAIL - WRONG_UMBRELLA] on ${TOPIC_RESPONSE}`);
+  console.log(payload);
+  console.log('');
+  printMenu();
 }
 
 function printMenu() {
-  console.log(`\n--- Interactive ESP32 Simulator Commands ---`);
-  console.log(`Type 1, 2, 3, or 4 to scan NFC tag at Slot 1-4`);
-  console.log(`Type "q" to quit\n`);
+  console.log('----------------------------------------------------');
+  console.log('Interactive Controls (ESP32 Outcome Simulator):');
+  console.log(' [1-4] Case 1: BORROW SUCCESS for Slot 1, 2, 3, or 4');
+  console.log(' [f]   Case 2: BORROW FAIL (NOT_TAKEN)');
+  console.log(' [r]   Case 3: RETURN SUCCESS for Slot 1');
+  console.log(' [n]   Case 4: RETURN FAIL (NO_UMBRELLA)');
+  console.log(' [w]   Case 5: RETURN FAIL (WRONG_UMBRELLA)');
+  console.log(' [q]   Exit simulator');
+  console.log('----------------------------------------------------');
+  process.stdout.write('👉 Input: ');
 }
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
+// Setup Keyboard Controls
+readline.emitKeypressEvents(process.stdin);
+if (process.stdin.isTTY) {
+  process.stdin.setRawMode(true);
+}
 
-rl.on('line', (line) => {
-  const input = line.trim();
-  if (input === '1') simulateScan(0);
-  else if (input === '2') simulateScan(1);
-  else if (input === '3') simulateScan(2);
-  else if (input === '4') simulateScan(3);
-  else if (input.toLowerCase() === 'q') {
+process.stdin.on('keypress', (str, key) => {
+  if (key && (key.name === 'q' || (key.ctrl && key.name === 'c'))) {
+    console.log('\n👋 Exiting cabinet simulator.');
     client.end();
     process.exit(0);
-  } else {
-    printMenu();
   }
+
+  if (['1', '2', '3', '4'].includes(str)) {
+    simulateBorrowSuccess(parseInt(str, 10));
+  } else if (str === 'f' || str === 'F') {
+    simulateBorrowFail();
+  } else if (str === 'r' || str === 'R') {
+    simulateReturnSuccess();
+  } else if (str === 'n' || str === 'N') {
+    simulateReturnFailNoUmbrella();
+  } else if (str === 'w' || str === 'W') {
+    simulateReturnFailWrongUmbrella();
+  }
+});
+
+client.on('error', (err) => {
+  console.warn('⚠️ [MQTT Warning]:', err.message);
 });
